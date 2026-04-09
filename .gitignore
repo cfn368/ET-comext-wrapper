@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.xlsx
+*.png
+data/
+old data/
+old versions/
+output/
