@@ -1,6 +1,6 @@
 # Green Tech Trade Balance
 
-Monthly EU extra-trade data for selected green-tech product categories (wind, solar, heat pumps, batteries, EVs), sourced from [Eurostat Comext](https://ec.europa.eu/eurostat/web/international-trade-in-goods/data/database) via their SDMX 2.1 API.
+Monthly EU extra-trade data for selected green-tech product categories (wind, solar, heat pumps, batteries, EVs), sourced from [Eurostat](https://ec.europa.eu/eurostat/databrowser/product/view/ds-045409?category=ext_go.ext_go_detail) via their SDMX 2.1 API.
 
 ## Notebooks
 
