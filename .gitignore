@@ -7,4 +7,6 @@ data/
 old data/
 old versions/
 output/
-1_clean_tech
+dist/
+1_clean_tech.ipynb
+pylib/groups.py

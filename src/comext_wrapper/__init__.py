@@ -4,7 +4,7 @@ SDMX 2.1 API (dataset DS-045409: EU trade by HS2/4/6 and CN8).
 
 Usage
 -----
-    from pylib.comext import ComextApi
+    from comext_wrapper import ComextApi
 
     api = ComextApi()
     api.info()                          # dataset overview + dimension list
@@ -25,12 +25,21 @@ Usage
 import gzip
 import json
 import re
-import time
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+__version__ = "0.1.0"
+__all__ = ["ComextApi"]
 
 _BASE = "https://ec.europa.eu/eurostat/api/comext/dissemination/sdmx/2.1"
+
+_retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503])
+_adapter = HTTPAdapter(max_retries=_retry)
+_session = requests.Session()
+_session.mount("https://", _adapter)
 
 
 class ComextApi:
@@ -52,17 +61,19 @@ class ComextApi:
     # Positional dimension order in the SDMX key
     _DIM_ORDER = ["freq", "reporter", "partner", "product", "flow", "indicators"]
 
+    # Shared across all instances in the same Python session
+    _cl_cache: dict[str, pd.DataFrame] = {}
+
     def __init__(self, dataset_id: str = "DS-045409"):
         self.dataset_id = dataset_id
-        self._cl_cache: dict[str, pd.DataFrame] = {}
 
     # ------------------------------------------------------------------
     # Public exploration methods
     # ------------------------------------------------------------------
 
-    def info(self) -> None:
-        """Print a summary of the dataset and its dimensions."""
-        r = requests.get(
+    def info(self) -> pd.DataFrame:
+        """Print a summary of the dataset and return a dimensions DataFrame."""
+        r = _session.get(
             f"{_BASE}/dataflow/ESTAT/{self.dataset_id}", timeout=30
         )
         r.raise_for_status()
@@ -92,9 +103,12 @@ class ComextApi:
                 "last label":  last["label"][:40],
             })
 
-        print(pd.DataFrame(rows).to_string(index=False))
+        summary = pd.DataFrame(rows)
+        print(summary.to_string(index=False))
         print()
         print("Key order: freq.reporter.partner.product.flow.indicators")
+
+        return summary
 
     def codes(
         self,
@@ -172,7 +186,7 @@ class ComextApi:
         if end_period:
             params["endPeriod"] = end_period
 
-        r = requests.get(url, params=params, timeout=300)
+        r = _session.get(url, params=params, timeout=300)
         r.raise_for_status()
 
         raw = r.content
@@ -192,9 +206,14 @@ class ComextApi:
         if cache_key in self._cl_cache:
             return self._cl_cache[cache_key]
 
-        r = requests.get(
+        r = _session.get(
             f"{_BASE}/codelist/ESTAT/{cl_id}/{cl_ver}", timeout=60
         )
+        if r.status_code == 404:
+            raise RuntimeError(
+                f"Codelist {cl_id} version {cl_ver} not found (HTTP 404). "
+                f"Eurostat may have released a new version — update _DIM_CODELISTS."
+            )
         r.raise_for_status()
 
         # Parse id + English label pairs from XML
@@ -242,5 +261,9 @@ class ComextApi:
 
         # Drop all-NaN rows (sparse datasets)
         df = df.dropna(subset=["value"]).reset_index(drop=True)
+
+        # Rename 'time' dimension to 'period' to avoid shadowing stdlib
+        if "time" in df.columns:
+            df = df.rename(columns={"time": "period"})
 
         return df

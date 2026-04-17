@@ -1,27 +1,10 @@
 # py_files/preamble.py
 from __future__ import annotations
 
-# --- stdlib ---
-import math
-from dataclasses import dataclass
-from io import StringIO
-
-# --- third-party ---
 import numpy as np
-
-try:
-    import pandas as pd
-except Exception:  # optional dependency
-    pd = None
-
-try:
-    import requests
-except Exception:  # optional dependency
-    requests = None
-
+import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
 
 
 def enable_autoreload(mode: int = 2) -> None:
@@ -85,9 +68,6 @@ def setup_notebook(*, autoreload: int = 2, aej: bool = True, **aej_kwargs) -> No
 
 # What you get with: from py_files.preamble import *
 __all__ = [
-    # functions
     "enable_autoreload", "set_aej", "setup_notebook",
-    # common modules/objects
-    "np", "pd", "plt", "mticker", "math", "StringIO", "requests",
-    "dataclass",
+    "np", "pd", "plt",
 ]
