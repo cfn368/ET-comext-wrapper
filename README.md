@@ -1,6 +1,9 @@
 # comext_wrapper
 
-A Python wrapper for the [Eurostat Comext SDMX 2.1 API](https://ec.europa.eu/eurostat/databrowser/product/view/ds-045409) (dataset DS-045409: EU trade by HS2/4/6 and CN8).
+Python wrappers for two Eurostat SDMX 2.1 trade APIs:
+
+- **`ComextApi`** — goods trade (DS-045409: EU trade by HS2/4/6 and CN8)
+- **`ServicesApi`** — international trade in services (BOP_ITS6_DET: EBOPS 2010 breakdown)
 
 ## Install
 
@@ -8,7 +11,7 @@ A Python wrapper for the [Eurostat Comext SDMX 2.1 API](https://ec.europa.eu/eur
 pip install comext_wrapper
 ```
 
-## Usage
+## Goods trade — `ComextApi`
 
 ```python
 from comext_wrapper import ComextApi
@@ -43,7 +46,7 @@ df = api.get_data(
 )
 ```
 
-## Dimensions
+### Dimensions
 
 | Dimension   | Description                        | Example values              |
 |-------------|------------------------------------|-----------------------------|
@@ -53,3 +56,36 @@ df = api.get_data(
 | `flow`      | Trade flow                         | `1`=import, `2`=export      |
 | `indicators`| Value type                         | `VALUE_IN_EUROS`, `QUANTITY_IN_100KG` |
 | `freq`      | Frequency                          | `M`=monthly, `A`=annual     |
+
+## Services trade — `ServicesApi`
+
+```python
+from comext_wrapper import ServicesApi
+
+api = ServicesApi()
+api.info()                              # dataset overview + dimension list
+api.codes("bop_item", search="transport") # search EBOPS service categories
+api.codes("partner", aggregates_only=True) # partner aggregates
+
+df = api.get_data(
+    geo          = "DK+DE+FR",
+    partner      = "WRL_REST",          # rest of world
+    bop_item     = "S",                 # total services
+    stk_flow     = "CRE+DEB",          # credit (exports) + debit (imports)
+    currency     = "MIO_EUR",
+    start_period = "2015",
+)
+```
+
+`get_data` returns a tidy `pandas.DataFrame` with one row per (geo, partner, bop_item, stk_flow, period) combination and a `value` column.
+
+### Dimensions
+
+| Dimension  | Description                         | Example values                      |
+|------------|-------------------------------------|-------------------------------------|
+| `geo`      | Reporting country (ISO-2)           | `DK`, `DE`                          |
+| `partner`  | Partner country / aggregate         | `WRL_REST`, `EU27_2020`             |
+| `bop_item` | EBOPS 2010 service category         | `S`=total, `SC`=transport, `SD`=travel |
+| `stk_flow` | Flow direction                      | `CRE`=exports, `DEB`=imports, `BAL`=balance |
+| `currency` | Currency                            | `MIO_EUR`, `MIO_NAC`                |
+| `freq`     | Frequency                           | `A`=annual, `Q`=quarterly           |
