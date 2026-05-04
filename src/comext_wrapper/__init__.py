@@ -1,24 +1,35 @@
 """
-ComextApi — a helper class for exploring and querying the Eurostat Comext
-SDMX 2.1 API (dataset DS-045409: EU trade by HS2/4/6 and CN8).
+ComextApi  — Eurostat Comext SDMX 2.1 API (DS-045409: EU goods trade by CN8).
+ServicesApi — Eurostat SDMX 2.1 API (BOP_ITS6_DET: EU international trade in services).
 
 Usage
 -----
-    from comext_wrapper import ComextApi
+    from comext_wrapper import ComextApi, ServicesApi
 
+    # Goods
     api = ComextApi()
-    api.info()                          # dataset overview + dimension list
-    api.codes("reporter")               # all valid reporter codes
-    api.codes("product", search="wind") # search CN codes by label
-    api.codes("indicators")             # available value indicators
-
+    api.info()
+    api.codes("product", search="heat pump")
     df = api.get_data(
-        reporter   = "DE+FR+DK",
-        partner    = "EXT_EU27_2020",   # extra-EU aggregate
-        product    = "85024000+85017100",
-        flow       = "1+2",             # 1=import, 2=export
-        indicators = "VALUE_IN_EUROS",
+        reporter     = "DE+FR+DK",
+        partner      = "EXT_EU27_2020",
+        product      = "85024000+85017100",
+        flow         = "1+2",
+        indicators   = "VALUE_IN_EUROS",
         start_period = "2020-01",
+    )
+
+    # Services
+    api = ServicesApi()
+    api.info()
+    api.codes("bop_item", search="transport")
+    df = api.get_data(
+        geo          = "DK+DE+FR",
+        partner      = "WRL_REST",
+        bop_item     = "S",
+        stk_flow     = "CRE+DEB",
+        currency     = "MIO_EUR",
+        start_period = "2015",
     )
 """
 
@@ -31,40 +42,29 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-__version__ = "0.1.0"
-__all__ = ["ComextApi"]
+__version__ = "0.2.0"
+__all__ = ["ComextApi", "ServicesApi"]
 
-_BASE = "https://ec.europa.eu/eurostat/api/comext/dissemination/sdmx/2.1"
+_COMEXT_BASE = "https://ec.europa.eu/eurostat/api/comext/dissemination/sdmx/2.1"
+_ESTAT_BASE  = "https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1"
 
-_retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503])
+_retry   = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503])
 _adapter = HTTPAdapter(max_retries=_retry)
 _session = requests.Session()
 _session.mount("https://", _adapter)
 
 
-class ComextApi:
-    """Interact with the Eurostat Comext SDMX 2.1 API."""
+class _SdmxApi:
+    """Shared SDMX 2.1 machinery. Subclass and set _BASE, _DSD_VERSION, _DIM_CODELISTS, _DIM_ORDER."""
 
-    # DSD version for DS-045409 (update if Eurostat releases a new one)
-    _DSD_VERSION = "6.1"
+    _BASE: str
+    _DSD_VERSION: str
+    _DIM_CODELISTS: dict[str, tuple[str, str]]
+    _DIM_ORDER: list[str]
 
-    # Maps dimension id → (codelist id, codelist version)
-    _DIM_CODELISTS = {
-        "freq":       ("CXT_FREQ",       "1.0"),
-        "reporter":   ("CXT_FREE_ISO",   "10.0"),
-        "partner":    ("CXT_FREE_ISO",   "10.0"),
-        "product":    ("CXT_NC",         "11.0"),
-        "flow":       ("CXT_EU_FLUX",    "1.0"),
-        "indicators": ("CXT_INDICATORS", "25.0"),
-    }
-
-    # Positional dimension order in the SDMX key
-    _DIM_ORDER = ["freq", "reporter", "partner", "product", "flow", "indicators"]
-
-    # Shared across all instances in the same Python session
     _cl_cache: dict[str, pd.DataFrame] = {}
 
-    def __init__(self, dataset_id: str = "DS-045409"):
+    def __init__(self, dataset_id: str):
         self.dataset_id = dataset_id
 
     # ------------------------------------------------------------------
@@ -74,7 +74,7 @@ class ComextApi:
     def info(self) -> pd.DataFrame:
         """Print a summary of the dataset and return a dimensions DataFrame."""
         r = _session.get(
-            f"{_BASE}/dataflow/ESTAT/{self.dataset_id}", timeout=30
+            f"{self._BASE}/dataflow/ESTAT/{self.dataset_id}", timeout=30
         )
         r.raise_for_status()
 
@@ -106,7 +106,7 @@ class ComextApi:
         summary = pd.DataFrame(rows)
         print(summary.to_string(index=False))
         print()
-        print("Key order: freq.reporter.partner.product.flow.indicators")
+        print(f"Key order: {'.'.join(self._DIM_ORDER)}")
 
         return summary
 
@@ -121,8 +121,8 @@ class ComextApi:
 
         Parameters
         ----------
-        dimension : one of freq / reporter / partner / product / flow / indicators
-        search    : optional substring to filter labels (case-insensitive)
+        dimension       : one of the dataset's dimensions (see _DIM_ORDER)
+        search          : optional substring to filter labels (case-insensitive)
         aggregates_only : if True, return only non-ISO-2-letter codes
                           (useful for reporter/partner aggregate groups)
         """
@@ -148,8 +148,94 @@ class ComextApi:
         return df.reset_index(drop=True)
 
     # ------------------------------------------------------------------
-    # Data retrieval
+    # Internal helpers
     # ------------------------------------------------------------------
+
+    def _get_codelist(self, cl_id: str, cl_ver: str) -> pd.DataFrame:
+        """Fetch and cache a codelist, returning a DataFrame of id/label."""
+        cache_key = f"{cl_id}/{cl_ver}"
+        if cache_key in self._cl_cache:
+            return self._cl_cache[cache_key]
+
+        r = _session.get(
+            f"{self._BASE}/codelist/ESTAT/{cl_id}/{cl_ver}", timeout=60
+        )
+        if r.status_code == 404:
+            raise RuntimeError(
+                f"Codelist {cl_id} version {cl_ver} not found (HTTP 404). "
+                f"Eurostat may have released a new version — update _DIM_CODELISTS."
+            )
+        r.raise_for_status()
+
+        entries = re.findall(
+            r'<s:Code id="([^"]+)"[^>]*>.*?<c:Name xml:lang="en">([^<]+)</c:Name>',
+            r.text,
+            re.DOTALL,
+        )
+        df = pd.DataFrame(entries, columns=["id", "label"])
+
+        self._cl_cache[cache_key] = df
+        return df
+
+    @staticmethod
+    def _jsonstat_to_df(data: dict) -> pd.DataFrame:
+        """Convert a JSON-stat response to a flat DataFrame."""
+        ids  = data["id"]
+        dims = data["dimension"]
+        vals = data["value"]
+
+        levels = []
+        for dim in ids:
+            cat = dims[dim]["category"]
+            idx = cat["index"]
+            if isinstance(idx, dict):
+                codes = [k for k, _ in sorted(idx.items(), key=lambda kv: kv[1])]
+            else:
+                codes = list(idx)
+            levels.append(codes)
+
+        mi = pd.MultiIndex.from_product(levels, names=ids)
+
+        if isinstance(vals, dict):
+            y = [float("nan")] * mi.size
+            for k, v in vals.items():
+                y[int(k)] = v
+        else:
+            y = vals
+
+        df = mi.to_frame(index=False)
+        df["value"] = y
+        df = df.dropna(subset=["value"]).reset_index(drop=True)
+
+        if "time" in df.columns:
+            df = df.rename(columns={"time": "period"})
+
+        return df
+
+
+# ==============================================================================
+# Goods trade
+# ==============================================================================
+
+class ComextApi(_SdmxApi):
+    """Interact with the Eurostat Comext SDMX 2.1 API (goods trade, DS-045409)."""
+
+    _BASE        = _COMEXT_BASE
+    _DSD_VERSION = "6.1"
+
+    _DIM_CODELISTS = {
+        "freq":       ("CXT_FREQ",       "1.0"),
+        "reporter":   ("CXT_FREE_ISO",   "10.0"),
+        "partner":    ("CXT_FREE_ISO",   "10.0"),
+        "product":    ("CXT_NC",         "11.0"),
+        "flow":       ("CXT_EU_FLUX",    "1.0"),
+        "indicators": ("CXT_INDICATORS", "25.0"),
+    }
+
+    _DIM_ORDER = ["freq", "reporter", "partner", "product", "flow", "indicators"]
+
+    def __init__(self, dataset_id: str = "DS-045409"):
+        super().__init__(dataset_id)
 
     def get_data(
         self,
@@ -163,7 +249,7 @@ class ComextApi:
         end_period:   str | None = None,
     ) -> pd.DataFrame:
         """
-        Fetch trade data and return a tidy pandas DataFrame.
+        Fetch goods trade data and return a tidy pandas DataFrame.
 
         Use '+' to combine multiple values per dimension, e.g.
             reporter = "DE+FR+DK"
@@ -181,7 +267,7 @@ class ComextApi:
         end_period   : e.g. '2024-12'  (optional)
         """
         key = f"{freq}.{reporter}.{partner}.{product}.{flow}.{indicators}"
-        url = f"{_BASE}/data/{self.dataset_id}/{key}"
+        url = f"{self._BASE}/data/{self.dataset_id}/{key}"
         params: dict = {"format": "JSON", "startPeriod": start_period, "compressed": "true"}
         if end_period:
             params["endPeriod"] = end_period
@@ -196,74 +282,74 @@ class ComextApi:
 
         return self._jsonstat_to_df(data)
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
-    def _get_codelist(self, cl_id: str, cl_ver: str) -> pd.DataFrame:
-        """Fetch and cache a codelist, returning a DataFrame of id/label."""
-        cache_key = f"{cl_id}/{cl_ver}"
-        if cache_key in self._cl_cache:
-            return self._cl_cache[cache_key]
+# ==============================================================================
+# Services trade
+# ==============================================================================
 
-        r = _session.get(
-            f"{_BASE}/codelist/ESTAT/{cl_id}/{cl_ver}", timeout=60
-        )
-        if r.status_code == 404:
-            raise RuntimeError(
-                f"Codelist {cl_id} version {cl_ver} not found (HTTP 404). "
-                f"Eurostat may have released a new version — update _DIM_CODELISTS."
-            )
+class ServicesApi(_SdmxApi):
+    """Interact with the Eurostat SDMX 2.1 API for international trade in services (BOP_ITS6_DET)."""
+
+    _BASE        = _ESTAT_BASE
+    _DSD_VERSION = "44.0"
+
+    _DIM_CODELISTS = {
+        "freq":     ("FREQ",     "3.9"),
+        "currency": ("CURRENCY", "5.1"),
+        "bop_item": ("BOP_ITEM", "7.3"),
+        "stk_flow": ("STK_FLOW", "6.2"),
+        "partner":  ("PARTNER",  "31.2"),
+        "geo":      ("GEO",      "28.0"),
+    }
+
+    # Positional order in the SDMX key (from the DSD)
+    _DIM_ORDER = ["freq", "currency", "bop_item", "stk_flow", "partner", "geo"]
+
+    def __init__(self, dataset_id: str = "BOP_ITS6_DET"):
+        super().__init__(dataset_id)
+
+    def get_data(
+        self,
+        geo:          str = "DK",
+        partner:      str = "WRL_REST",
+        bop_item:     str = "S",
+        stk_flow:     str = "CRE+DEB",
+        currency:     str = "MIO_EUR",
+        freq:         str = "A",
+        start_period: str = "2015",
+        end_period:   str | None = None,
+    ) -> pd.DataFrame:
+        """
+        Fetch international trade in services data and return a tidy pandas DataFrame.
+
+        Use '+' to combine multiple values per dimension, e.g.
+            geo      = "DK+DE+FR"
+            bop_item = "SC+SD+SE"
+
+        Parameters
+        ----------
+        geo          : ISO-2 reporter country code(s), e.g. 'DK'
+        partner      : partner country/region — use api.codes('partner', aggregates_only=True)
+        bop_item     : EBOPS 2010 service category — use api.codes('bop_item', search=...)
+                       'S'=total services, 'SC'=transport, 'SD'=travel, 'SE'=other
+        stk_flow     : CRE=credit/exports, DEB=debit/imports, BAL=balance
+        currency     : MIO_EUR (default) or MIO_NAC
+        freq         : A=annual, Q=quarterly
+        start_period : e.g. '2015' (annual) or '2015-Q1' (quarterly)
+        end_period   : optional, e.g. '2023'
+        """
+        key = f"{freq}.{currency}.{bop_item}.{stk_flow}.{partner}.{geo}"
+        url = f"{self._BASE}/data/{self.dataset_id}/{key}"
+        params: dict = {"format": "JSON", "startPeriod": start_period, "compressed": "true"}
+        if end_period:
+            params["endPeriod"] = end_period
+
+        r = _session.get(url, params=params, timeout=300)
         r.raise_for_status()
 
-        # Parse id + English label pairs from XML
-        entries = re.findall(
-            r'<s:Code id="([^"]+)"[^>]*>.*?<c:Name xml:lang="en">([^<]+)</c:Name>',
-            r.text,
-            re.DOTALL,
-        )
-        df = pd.DataFrame(entries, columns=["id", "label"])
+        raw = r.content
+        if raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
+        data = json.loads(raw.decode("utf-8"))
 
-        self._cl_cache[cache_key] = df
-        return df
-
-    @staticmethod
-    def _jsonstat_to_df(data: dict) -> pd.DataFrame:
-        """Convert a JSON-stat response to a flat DataFrame."""
-        ids   = data["id"]
-        dims  = data["dimension"]
-        vals  = data["value"]
-
-        # Build ordered code list per dimension
-        levels = []
-        for dim in ids:
-            cat = dims[dim]["category"]
-            idx = cat["index"]
-            if isinstance(idx, dict):
-                codes = [k for k, _ in sorted(idx.items(), key=lambda kv: kv[1])]
-            else:
-                codes = list(idx)
-            levels.append(codes)
-
-        # Multi-index of all combinations
-        mi = pd.MultiIndex.from_product(levels, names=ids)
-
-        # Values (JSON-stat can be sparse dict or dense list)
-        if isinstance(vals, dict):
-            y = [float("nan")] * mi.size
-            for k, v in vals.items():
-                y[int(k)] = v
-        else:
-            y = vals
-
-        df = mi.to_frame(index=False)
-        df["value"] = y
-
-        # Drop all-NaN rows (sparse datasets)
-        df = df.dropna(subset=["value"]).reset_index(drop=True)
-
-        # Rename 'time' dimension to 'period' to avoid shadowing stdlib
-        if "time" in df.columns:
-            df = df.rename(columns={"time": "period"})
-
-        return df
+        return self._jsonstat_to_df(data)
